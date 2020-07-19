@@ -47,9 +47,12 @@
 #ifndef RAK_SOCKET_ADDRESS_H
 #define RAK_SOCKET_ADDRESS_H
 
+#include <cinttypes>
+#include <cstdint>
 #include <cstring>
-#include <string>
 #include <stdexcept>
+#include <string>
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/types.h>
@@ -77,11 +80,13 @@ public:
   static const int         pf_local  = PF_UNIX;
 #endif
 
+  bool                is_any() const;
   bool                is_valid() const;
   bool                is_bindable() const;
   bool                is_address_any() const;
 
-  // Should we need to set AF_UNSPEC?
+  bool                is_valid_inet_class() const             { return family() == af_inet || family() == af_inet6; }
+
   void                clear()                                 { std::memset(this, 0, sizeof(socket_address)); set_family(); }
 
   sa_family_t         family() const                          { return m_sockaddr.sa_family; }
@@ -92,6 +97,8 @@ public:
 
   std::string         address_str() const;
   bool                address_c_str(char* buf, socklen_t size) const;
+
+  std::string         pretty_address_str() const;
 
   // Attemts to set it as an inet, then an inet6 address. It will
   // never set anything but net addresses, no local/unix.
@@ -109,18 +116,17 @@ public:
   const sockaddr*     c_sockaddr() const                      { return &m_sockaddr; }
   const sockaddr_in*  c_sockaddr_inet() const                 { return &m_sockaddrInet; }
 
-#ifdef RAK_USE_INET6
   socket_address_inet6*       sa_inet6()                      { return reinterpret_cast<socket_address_inet6*>(this); }
   const socket_address_inet6* sa_inet6() const                { return reinterpret_cast<const socket_address_inet6*>(this); }
 
   sockaddr_in6*       c_sockaddr_inet6()                      { return &m_sockaddrInet6; }
   const sockaddr_in6* c_sockaddr_inet6() const                { return &m_sockaddrInet6; }
-#endif
 
   // Copy a socket address which has the length 'length. Zero out any
   // extranous bytes and ensure it does not go beyond the size of this
   // struct.
   void                copy(const socket_address& src, size_t length);
+  void                copy_sockaddr(const sockaddr* src);
 
   static socket_address*       cast_from(sockaddr* sa)        { return reinterpret_cast<socket_address*>(sa); }
   static const socket_address* cast_from(const sockaddr* sa)  { return reinterpret_cast<const socket_address*>(sa); }
@@ -139,13 +145,11 @@ private:
   union {
     sockaddr            m_sockaddr;
     sockaddr_in         m_sockaddrInet;
-#ifdef RAK_USE_INET6
     sockaddr_in6        m_sockaddrInet6;
-#endif
   };
 };
 
-// Remeber to set the AF_INET.
+// Remember to set the AF_INET.
 
 class socket_address_inet {
 public:
@@ -184,6 +188,8 @@ public:
 
   const sockaddr*     c_sockaddr() const                      { return reinterpret_cast<const sockaddr*>(&m_sockaddr); }
   const sockaddr_in*  c_sockaddr_inet() const                 { return &m_sockaddr; }
+  
+  socket_address_inet6 to_mapped_address() const;
 
   bool                operator == (const socket_address_inet& rhs) const;
   bool                operator < (const socket_address_inet& rhs) const;
@@ -192,57 +198,70 @@ private:
   struct sockaddr_in  m_sockaddr;
 };
 
-// Unique key for the address, excluding port numbers etc.
-class socket_address_key {
+class socket_address_inet6 {
 public:
-//   socket_address_host_key() {}
+  bool                is_any() const                          { return is_port_any() && is_address_any(); }
+  bool                is_valid() const                        { return !is_port_any() && !is_address_any(); }
+  bool                is_port_any() const                     { return port() == 0; }
+  bool                is_address_any() const                  { return std::memcmp(&m_sockaddr.sin6_addr, &in6addr_any, sizeof(in6_addr)) == 0; }
 
-  socket_address_key(const socket_address& sa) {
-    *this = sa;
-  }
+  void                clear()                                 { std::memset(this, 0, sizeof(socket_address_inet6)); set_family(); }
 
-  socket_address_key& operator = (const socket_address& sa) {
-    if (sa.family() == 0) {
-      std::memset(this, 0, sizeof(socket_address_key));
+  uint16_t            port() const                            { return ntohs(m_sockaddr.sin6_port); }
+  uint16_t            port_n() const                          { return m_sockaddr.sin6_port; }
+  void                set_port(uint16_t p)                    { m_sockaddr.sin6_port = htons(p); }
+  void                set_port_n(uint16_t p)                  { m_sockaddr.sin6_port = p; }
 
-    } else if (sa.family() == socket_address::af_inet) {
-      // Using hardware order as we use operator < to compare when
-      // using inet only.
-      m_addr.s_addr = sa.sa_inet()->address_h();
+  in6_addr            address() const                         { return m_sockaddr.sin6_addr; }
+  const in6_addr*     address_ptr() const                     { return &m_sockaddr.sin6_addr; }
+  std::string         address_str() const;
+  bool                address_c_str(char* buf, socklen_t size) const;
 
-    } else {
-      // When we implement INET6 handling, embed the ipv4 address in
-      // the ipv6 address.
-      throw std::logic_error("socket_address_key(...) received an unsupported protocol family.");
-    }
+  void                set_address(in6_addr a)                 { m_sockaddr.sin6_addr = a; }
+  bool                set_address_str(const std::string& a)   { return set_address_c_str(a.c_str()); }
+  bool                set_address_c_str(const char* a);
 
-    return *this;
-  }
+  void                set_address_any()                       { set_port(0); set_address(in6addr_any); }
 
-//   socket_address_key& operator = (const socket_address_key& sa) {
-//   }
+  std::string         pretty_address_str() const;
 
-  bool operator < (const socket_address_key& sa) const {
-    // Compare the memory area instead.
-    return m_addr.s_addr < sa.m_addr.s_addr;
-  }    
+  sa_family_t         family() const                          { return m_sockaddr.sin6_family; }
+  void                set_family()                            { m_sockaddr.sin6_family = AF_INET6; }
+
+  sockaddr*           c_sockaddr()                            { return reinterpret_cast<sockaddr*>(&m_sockaddr); }
+  sockaddr_in6*       c_sockaddr_inet6()                      { return &m_sockaddr; }
+
+  const sockaddr*     c_sockaddr() const                      { return reinterpret_cast<const sockaddr*>(&m_sockaddr); }
+  const sockaddr_in6* c_sockaddr_inet6() const                { return &m_sockaddr; }
+
+  socket_address      normalize_address() const;
+
+  bool                operator == (const socket_address_inet6& rhs) const;
+  bool                operator < (const socket_address_inet6& rhs) const;
 
 private:
-  union {
-    in_addr m_addr;
-// #ifdef RAK_USE_INET6
-//     in_addr6 m_addr6;
-// #endif
-  };
+  struct sockaddr_in6 m_sockaddr;
 };
+
+inline bool
+socket_address::is_any() const {
+  switch (family()) {
+  case af_inet:
+    return sa_inet()->is_any();
+  case af_inet6:
+    return sa_inet6()->is_any();
+  default:
+    return false;
+  }
+}
 
 inline bool
 socket_address::is_valid() const {
   switch (family()) {
   case af_inet:
     return sa_inet()->is_valid();
-//   case af_inet6:
-//     return sa_inet6().is_valid();
+  case af_inet6:
+    return sa_inet6()->is_valid();
   default:
     return false;
   }
@@ -253,6 +272,8 @@ socket_address::is_bindable() const {
   switch (family()) {
   case af_inet:
     return !sa_inet()->is_address_any();
+  case af_inet6:
+    return !sa_inet6()->is_address_any();
   default:
     return false;
   }
@@ -263,6 +284,8 @@ socket_address::is_address_any() const {
   switch (family()) {
   case af_inet:
     return sa_inet()->is_address_any();
+  case af_inet6:
+    return sa_inet6()->is_address_any();
   default:
     return true;
   }
@@ -273,6 +296,8 @@ socket_address::port() const {
   switch (family()) {
   case af_inet:
     return sa_inet()->port();
+  case af_inet6:
+    return sa_inet6()->port();
   default:
     return 0;
   }
@@ -283,6 +308,8 @@ socket_address::set_port(uint16_t p) {
   switch (family()) {
   case af_inet:
     return sa_inet()->set_port(p);
+  case af_inet6:
+    return sa_inet6()->set_port(p);
   default:
     break;
   }
@@ -293,6 +320,8 @@ socket_address::address_str() const {
   switch (family()) {
   case af_inet:
     return sa_inet()->address_str();
+  case af_inet6:
+    return sa_inet6()->address_str();
   default:
     return std::string();
   }
@@ -303,15 +332,36 @@ socket_address::address_c_str(char* buf, socklen_t size) const {
   switch (family()) {
   case af_inet:
     return sa_inet()->address_c_str(buf, size);
+  case af_inet6:
+    return sa_inet6()->address_c_str(buf, size);
   default:
     return false;
   }
 }
 
+inline std::string
+socket_address::pretty_address_str() const {
+  switch (family()) {
+  case af_inet:
+    return sa_inet()->address_str();
+  case af_inet6:
+    return sa_inet6()->pretty_address_str();
+  case af_unspec:
+    return std::string("unspec");
+  default:
+    return std::string("invalid");
+  }
+}
+
+
 inline bool
 socket_address::set_address_c_str(const char* a) {
   if (sa_inet()->set_address_c_str(a)) {
     sa_inet()->set_family();
+    return true;
+
+  } else if (sa_inet6()->set_address_c_str(a)) {
+    sa_inet6()->set_family();
     return true;
 
   } else {
@@ -325,6 +375,8 @@ socket_address::length() const {
   switch(family()) {
   case af_inet:
     return sizeof(sockaddr_in);
+  case af_inet6:
+    return sizeof(sockaddr_in6);
   default:
     return 0;
   }      
@@ -333,13 +385,16 @@ socket_address::length() const {
 inline void
 socket_address::copy(const socket_address& src, size_t length) {
   length = std::min(length, sizeof(socket_address));
-  
-  // Does this get properly optimized?
+
   std::memset(this, 0, sizeof(socket_address));
   std::memcpy(this, &src, length);
 }
 
-// Should we be able to compare af_unspec?
+inline void
+socket_address::copy_sockaddr(const sockaddr* src) {
+  std::memset(this, 0, sizeof(socket_address));
+  std::memcpy(this, src, socket_address::cast_from(src)->length());
+}
 
 inline bool
 socket_address::operator == (const socket_address& rhs) const {
@@ -349,8 +404,8 @@ socket_address::operator == (const socket_address& rhs) const {
   switch (family()) {
   case af_inet:
     return *sa_inet() == *rhs.sa_inet();
-//   case af_inet6:
-//     return *sa_inet6() == *rhs.sa_inet6();
+  case af_inet6:
+    return *sa_inet6() == *rhs.sa_inet6();
   default:
     throw std::logic_error("socket_address::operator == (rhs) invalid type comparison.");
   }
@@ -364,8 +419,8 @@ socket_address::operator < (const socket_address& rhs) const {
   switch (family()) {
   case af_inet:
     return *sa_inet() < *rhs.sa_inet();
-//   case af_inet6:
-//     return *sa_inet6() < *rhs.sa_inet6();
+  case af_inet6:
+    return *sa_inet6() < *rhs.sa_inet6();
   default:
     throw std::logic_error("socket_address::operator < (rhs) invalid type comparison.");
   }
@@ -391,6 +446,21 @@ socket_address_inet::set_address_c_str(const char* a) {
   return inet_pton(AF_INET, a, &m_sockaddr.sin_addr);
 }
 
+inline socket_address_inet6
+socket_address_inet::to_mapped_address() const {
+  uint32_t addr32[4];
+  addr32[0] = 0;
+  addr32[1] = 0;
+  addr32[2] = htonl(0xffff);
+  addr32[3] = m_sockaddr.sin_addr.s_addr;
+  
+  socket_address_inet6 sa;
+  sa.clear();
+  sa.set_address(*reinterpret_cast<in6_addr *>(addr32));
+  sa.set_port_n(m_sockaddr.sin_port);
+  return sa;
+}
+
 inline bool
 socket_address_inet::operator == (const socket_address_inet& rhs) const {
   return
@@ -404,6 +474,84 @@ socket_address_inet::operator < (const socket_address_inet& rhs) const {
     m_sockaddr.sin_addr.s_addr < rhs.m_sockaddr.sin_addr.s_addr ||
     (m_sockaddr.sin_addr.s_addr == rhs.m_sockaddr.sin_addr.s_addr &&
      m_sockaddr.sin_port < rhs.m_sockaddr.sin_port);
+}
+
+inline std::string
+socket_address_inet6::address_str() const {
+  char buf[INET6_ADDRSTRLEN];
+
+  if (!address_c_str(buf, INET6_ADDRSTRLEN))
+    return std::string();
+
+  return std::string(buf);
+}
+
+inline bool
+socket_address_inet6::address_c_str(char* buf, socklen_t size) const {
+  return inet_ntop(family(), &m_sockaddr.sin6_addr, buf, size);
+}
+
+inline bool
+socket_address_inet6::set_address_c_str(const char* a) {
+  return inet_pton(AF_INET6, a, &m_sockaddr.sin6_addr);
+}
+
+inline std::string
+socket_address_inet6::pretty_address_str() const {
+  char buf[INET6_ADDRSTRLEN + 2 + 6];
+
+  if (inet_ntop(family(), &m_sockaddr.sin6_addr, buf + 1, INET6_ADDRSTRLEN) == NULL)
+    return std::string();
+
+  buf[0] = '[';
+
+  char* last_char = (char*)std::memchr(buf + 1, 0, INET6_ADDRSTRLEN);
+
+  // TODO: Throw exception here.
+
+  if (last_char == NULL || last_char >= buf + 1 + INET6_ADDRSTRLEN)
+    throw std::logic_error("inet_ntop for inet6 returned bad buffer");
+
+  *(last_char++) = ']';
+
+  if (!is_port_any()) {
+    if (snprintf(last_char, 7, ":%" PRIu16, port()) == -1)
+      return std::string("error"); // TODO: Throw here.
+
+  } else {
+    *last_char = '\0';
+  }
+
+  return std::string(buf);
+}
+
+inline socket_address
+socket_address_inet6::normalize_address() const {
+  const uint32_t *addr32 = reinterpret_cast<const uint32_t *>(m_sockaddr.sin6_addr.s6_addr);
+  if (addr32[0] == 0 && addr32[1] == 0 && addr32[2] == htonl(0xffff)) {
+    socket_address addr4;
+    addr4.sa_inet()->set_family();
+    addr4.sa_inet()->set_address_n(addr32[3]);
+    addr4.sa_inet()->set_port_n(m_sockaddr.sin6_port);
+    return addr4;
+  }
+  return *reinterpret_cast<const socket_address*>(this);
+}
+
+inline bool
+socket_address_inet6::operator == (const socket_address_inet6& rhs) const {
+  return
+    memcmp(&m_sockaddr.sin6_addr, &rhs.m_sockaddr.sin6_addr, sizeof(in6_addr)) == 0 &&
+    m_sockaddr.sin6_port == rhs.m_sockaddr.sin6_port;
+}
+
+inline bool
+socket_address_inet6::operator < (const socket_address_inet6& rhs) const {
+  int addr_comp = memcmp(&m_sockaddr.sin6_addr, &rhs.m_sockaddr.sin6_addr, sizeof(in6_addr));
+  return
+    addr_comp < 0 ||
+    (addr_comp == 0 ||
+     m_sockaddr.sin6_port < rhs.m_sockaddr.sin6_port);
 }
 
 }

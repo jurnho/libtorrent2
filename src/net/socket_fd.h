@@ -39,6 +39,8 @@
 
 #include <unistd.h>
 
+struct sockaddr;
+
 namespace rak {
   class socket_address;
 }
@@ -51,6 +53,7 @@ public:
 
   SocketFd() : m_fd(-1) {}
   explicit SocketFd(int fd) : m_fd(fd) {}
+  SocketFd(int fd, bool ipv6_socket) : m_fd(fd), m_ipv6_socket(ipv6_socket) {}
 
   bool                is_valid() const                        { return m_fd >= 0; }
   
@@ -59,6 +62,7 @@ public:
 
   bool                set_nonblock();
   bool                set_reuse_address(bool state);
+  bool                set_ipv6_v6only(bool state);
 
   bool                set_priority(priority_type p);
 
@@ -78,7 +82,12 @@ public:
 
   bool                bind(const rak::socket_address& sa);
   bool                bind(const rak::socket_address& sa, unsigned int length);
+  bool                bind_sa(const sockaddr* sa);
+
   bool                connect(const rak::socket_address& sa);
+  bool                connect_sa(const sockaddr* sa);
+
+  bool                getsockname(rak::socket_address* sa);
 
   bool                listen(int size);
   SocketFd            accept(rak::socket_address* sa);
@@ -90,6 +99,7 @@ private:
   inline void         check_valid() const;
 
   int                 m_fd;
+  bool                m_ipv6_socket;
 };
 
 }

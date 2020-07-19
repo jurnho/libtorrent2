@@ -49,6 +49,7 @@
 #include "torrent/poll.h"
 #include "torrent/object_static_map.h"
 #include "torrent/throttle.h"
+#include "torrent/utils/log.h"
 #include "tracker/tracker_dht.h"
 
 #include "dht_bucket.h"
@@ -56,6 +57,9 @@
 #include "dht_transaction.h"
 
 #include "manager.h"
+
+#define LT_LOG_THIS(log_fmt, ...)                                       \
+  lt_log_print_subsystem(torrent::LOG_DHT_SERVER, "dht_server", log_fmt, __VA_ARGS__);
 
 namespace torrent {
 
@@ -144,8 +148,15 @@ DhtServer::start(int port) {
       throw resource_error("Could not set listening port to reuse address.");
 
     rak::socket_address sa = *m_router->address();
+
+    if (sa.family() == rak::socket_address::af_unspec)
+      sa.sa_inet6()->clear();
+
     sa.set_port(port);
 
+    LT_LOG_THIS("starting (address:%s)", sa.pretty_address_str().c_str());
+
+    // Figure out how to bind to both inet and inet6.
     if (!get_fd().bind(sa))
       throw resource_error("Could not bind datagram socket.");
 
@@ -173,6 +184,8 @@ DhtServer::stop() {
   if (!is_active())
     return;
 
+  LT_LOG_THIS("stopping", 0);
+
   clear_transactions();
 
   priority_queue_erase(&taskScheduler, &m_taskTimeout);
@@ -192,7 +205,7 @@ DhtServer::stop() {
 }
 
 void
-DhtServer::reset_statistics() { 
+DhtServer::reset_statistics() {
   m_queriesReceived = 0;
   m_queriesSent = 0;
   m_repliesReceived = 0;
@@ -250,6 +263,7 @@ DhtServer::cancel_announce(DownloadInfo* info, const TrackerDht* tracker) {
       DhtAnnounce* announce = static_cast<DhtAnnounce*>(itr->second->as_search()->search());
 
       if ((info == NULL || announce->target() == info->hash()) && (tracker == NULL || announce->tracker() == tracker)) {
+        drop_packet(itr->second->packet());
         delete itr->second;
         m_transactions.erase(itr++);
         continue;
@@ -396,6 +410,7 @@ DhtServer::process_response(const HashString& id, const rak::socket_address* sa,
     m_router->node_replied(id, sa);
 
   } catch (std::exception& e) {
+    drop_packet(itr->second->packet());
     delete itr->second;
     m_transactions.erase(itr);
 
@@ -403,6 +418,7 @@ DhtServer::process_response(const HashString& id, const rak::socket_address* sa,
     throw;
   }
 
+  drop_packet(itr->second->packet());
   delete itr->second;
   m_transactions.erase(itr);
 }
@@ -423,6 +439,7 @@ DhtServer::process_error(const rak::socket_address* sa, const DhtMessage& error)
   // If it consistently returns errors for valid queries it's probably broken.  But a
   // few error messages are acceptable. So we do nothing and pretend the query never happened.
 
+  drop_packet(itr->second->packet());
   delete itr->second;
   m_transactions.erase(itr);
 }
@@ -519,6 +536,12 @@ DhtServer::add_packet(DhtTransactionPacket* packet, int priority) {
 }
 
 void
+DhtServer::drop_packet(DhtTransactionPacket* packet) {
+    m_highQueue.erase(std::remove(m_highQueue.begin(), m_highQueue.end(), packet), m_highQueue.end());
+    m_lowQueue.erase(std::remove(m_lowQueue.begin(), m_lowQueue.end(), packet), m_lowQueue.end());
+}
+
+void
 DhtServer::create_query(transaction_itr itr, int tID, const rak::socket_address* sa, int priority) {
   if (itr->second->id() == m_router->id())
     throw internal_error("DhtServer::create_query trying to send to itself.");
@@ -578,7 +601,7 @@ void
 DhtServer::create_error(const DhtMessage& req, const rak::socket_address* sa, int num, const char* msg) {
   DhtMessage error;
 
-  if (req[key_t].is_raw_bencode() || req[key_t].is_raw_string())
+  if (req[key_t].is_raw_string() && req[key_t].as_raw_string().size() < 67)
     error[key_t] = req[key_t];
 
   error[key_y] = raw_bencode::from_c_str("1:e");
@@ -657,6 +680,7 @@ DhtServer::failed_transaction(transaction_itr itr, bool quick) {
 
     } catch (std::exception& e) {
       if (!quick) {
+        drop_packet(transaction->packet());
         delete itr->second;
         m_transactions.erase(itr);
       }
@@ -669,6 +693,7 @@ DhtServer::failed_transaction(transaction_itr itr, bool quick) {
     return ++itr;         // don't actually delete the transaction until the final timeout
 
   } else {
+    drop_packet(transaction->packet());
     delete itr->second;
     m_transactions.erase(itr++);
     return itr;
@@ -677,8 +702,10 @@ DhtServer::failed_transaction(transaction_itr itr, bool quick) {
 
 void
 DhtServer::clear_transactions() {
-  for (transaction_map::iterator itr = m_transactions.begin(), last = m_transactions.end(); itr != last; itr++)
+  for (transaction_map::iterator itr = m_transactions.begin(), last = m_transactions.end(); itr != last; itr++) {
+    drop_packet(itr->second->packet());
     delete itr->second;
+  }
 
   m_transactions.clear();
 }
@@ -701,6 +728,14 @@ DhtServer::event_read() {
       if (read < 0)
         break;
 
+      // We can currently only process mapped-IPv4 addresses, not real IPv6.
+      // Translate them to an af_inet socket_address.
+      if (sa.family() == rak::socket_address::af_inet6)
+        sa = sa.sa_inet6()->normalize_address();
+
+      if (sa.family() != rak::socket_address::af_inet)
+        continue;
+
       total += read;
 
       // If it's not a valid bencode dictionary at all, it's probably not a DHT
@@ -713,6 +748,11 @@ DhtServer::event_read() {
 
       if (!message[key_t].is_raw_string())
         throw dht_error(dht_error_protocol, "No transaction ID");
+
+      // Restrict the length of Transaction IDs. We echo them in our replies.
+      if(message[key_t].as_raw_string().size() > 20) {
+		  throw dht_error(dht_error_protocol, "Transaction ID length too long");
+      }
 
       if (!message[key_y].is_raw_string())
         throw dht_error(dht_error_protocol, "No message type");
@@ -796,6 +836,9 @@ DhtServer::process_queue(packet_queue& queue, uint32_t* quota) {
 
   while (!queue.empty()) {
     DhtTransactionPacket* packet = queue.front();
+    DhtTransaction::key_type transactionKey = 0;
+    if(packet->has_transaction())
+      transactionKey = packet->transaction()->key(packet->id());
 
     // Make sure its transaction hasn't timed out yet, if it has/had one
     // and don't bother sending non-transaction packets (replies) after 
@@ -828,7 +871,7 @@ DhtServer::process_queue(packet_queue& queue, uint32_t* quota) {
     } catch (network_error& e) {
       // Couldn't write packet, maybe something wrong with node address or routing, so mark node as bad.
       if (packet->has_transaction()) {
-        transaction_itr itr = m_transactions.find(packet->transaction()->key(packet->id()));
+        transaction_itr itr = m_transactions.find(transactionKey);
         if (itr == m_transactions.end())
           throw internal_error("DhtServer::process_queue could not find transaction.");
 
@@ -836,8 +879,12 @@ DhtServer::process_queue(packet_queue& queue, uint32_t* quota) {
       }
     }
 
-    if (packet->has_transaction())
-      packet->transaction()->set_packet(NULL);
+    if (packet->has_transaction()) {
+      // here transaction can be already deleted by failed_transaction.
+      transaction_itr itr = m_transactions.find(transactionKey);
+      if (itr != m_transactions.end())
+        packet->transaction()->set_packet(NULL);
+    }
 
     delete packet;
   }
