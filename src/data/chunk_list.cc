@@ -284,11 +284,11 @@ ChunkList::sync_chunk(ChunkListNode* node, std::pair<int,bool> options) {
 
 uint32_t
 ChunkList::sync_chunks(int flags) {
+  lt_log_print(torrent::LOG_INFO, "sync_chunks: start");
   LT_LOG_THIS(DEBUG, "Sync chunks: flags:%#x.", flags);
 
   size_type qs = queue_size();
-  LT_LOG_THIS(INFO, "Sync chunks: queue size: %d", qs);
-
+  lt_log_print(torrent::LOG_INFO, "sync_chunks: queue_size: %d", qs);
   Queue::iterator split;
 
   if (flags & sync_all)
