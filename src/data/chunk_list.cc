@@ -198,7 +198,7 @@ ChunkList::get(size_type index, int flags) {
 
 // The chunks in 'm_queue' have been modified and need to be synced
 // when appropriate. Hopefully keeping the chunks mmap'ed for a while
-// will allow us to schedule writes at more resonable intervals.
+// will allow us to schedule writes at more reasonable intervals.
 
 void
 ChunkList::release(ChunkHandle* handle, int release_flags) {
@@ -286,6 +286,9 @@ uint32_t
 ChunkList::sync_chunks(int flags) {
   LT_LOG_THIS(DEBUG, "Sync chunks: flags:%#x.", flags);
 
+  size_type qs = queue_size();
+  LT_LOG_THIS(INFO, "Sync chunks: queue size: %d", qs);
+
   Queue::iterator split;
 
   if (flags & sync_all)
@@ -294,7 +297,7 @@ ChunkList::sync_chunks(int flags) {
     split = std::stable_partition(m_queue.begin(), m_queue.end(), rak::not_equal(1, std::mem_fun(&ChunkListNode::writable)));
 
   // Allow a flag that does more culling, so that we only get large
-  // continous sections.
+  // continuous sections.
   //
   // How does this interact with timers, should be make it so that
   // only areas with timers are (preferably) synced?
