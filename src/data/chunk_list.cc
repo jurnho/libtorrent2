@@ -290,9 +290,9 @@ ChunkList::sync_chunks(int flags) {
   size_type qs = queue_size();
 //  lt_log_print(torrent::LOG_INFO, "sync_chunks: queue_size: %d", qs);
 
-  if (qs == 0) {
-    return 0;
-  }
+//  if (qs == 0) {
+//    return 0;
+//  }
   Queue::iterator split;
 
   if (flags & sync_all)
